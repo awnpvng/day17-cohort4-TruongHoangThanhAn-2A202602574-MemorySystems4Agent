@@ -4,8 +4,24 @@ from dataclasses import dataclass
 from typing import Any
 
 from config import LabConfig, load_config
-from memory_store import CompactMemoryManager, UserProfileStore, estimate_tokens, extract_profile_updates
+from memory_store import (
+    CompactMemoryManager,
+    UserProfileStore,
+    estimate_tokens,
+    extract_profile_updates,
+)
 from model_provider import build_chat_model
+
+_MERGE_KEYS = {"style", "interests"}
+
+
+def _merge_descriptors(existing: str, new: str) -> str:
+    items: list[str] = []
+    for chunk in f"{existing},{new}".split(","):
+        chunk = chunk.strip()
+        if chunk and chunk not in items:
+            items.append(chunk)
+    return ", ".join(items)
 
 
 @dataclass
@@ -15,13 +31,7 @@ class AgentContext:
 
 
 class AdvancedAgent:
-    """Student TODO: implement Agent B / Advanced Agent.
-
-    Required memory layers:
-    1. within-session memory
-    2. persistent `User.md`
-    3. compact memory for long threads
-    """
+    """Agent B: within-session memory + persistent `User.md` + compact memory."""
 
     def __init__(self, config: LabConfig | None = None, force_offline: bool = False) -> None:
         self.config = config or load_config()
@@ -34,73 +44,133 @@ class AdvancedAgent:
         self.thread_tokens: dict[str, int] = {}
         self.thread_prompt_tokens: dict[str, int] = {}
 
-        # TODO: optionally initialize a real LangChain/LangGraph agent.
-        self.langchain_agent = None
+        self.langchain_agent = None if force_offline else self._maybe_build_langchain_agent()
 
     def reply(self, user_id: str, thread_id: str, message: str) -> dict[str, Any]:
-        """Student TODO: route between offline mode and live mode."""
-
-        raise NotImplementedError
+        if self.langchain_agent is not None and not self.force_offline:
+            try:
+                return self._reply_live(user_id, thread_id, message)
+            except Exception:
+                pass
+        return self._reply_offline(user_id, thread_id, message)
 
     def token_usage(self, thread_id: str) -> int:
-        raise NotImplementedError
+        return self.thread_tokens.get(thread_id, 0)
 
     def prompt_token_usage(self, thread_id: str) -> int:
-        raise NotImplementedError
+        return self.thread_prompt_tokens.get(thread_id, 0)
 
     def memory_file_size(self, user_id: str) -> int:
-        raise NotImplementedError
+        return self.profile_store.file_size(user_id)
 
     def compaction_count(self, thread_id: str) -> int:
-        raise NotImplementedError
+        return self.compact_memory.compaction_count(thread_id)
 
     def _reply_offline(self, user_id: str, thread_id: str, message: str) -> dict[str, Any]:
-        """Student TODO: implement the deterministic advanced path.
+        updates = extract_profile_updates(message)
+        existing_facts = self.profile_store.facts(user_id)
+        for key, value in updates.items():
+            if key in _MERGE_KEYS:
+                merged = _merge_descriptors(existing_facts.get(key, ""), value)
+                self.profile_store.upsert_fact(user_id, key, merged)
+                existing_facts[key] = merged
+            else:
+                self.profile_store.upsert_fact(user_id, key, value)
+                existing_facts[key] = value
 
-        Pseudocode:
-        1. Extract stable profile facts from the incoming message.
-        2. Persist those facts into `User.md`.
-        3. Append the message into compact memory.
-        4. Estimate prompt-context load from `User.md` + summary + recent messages.
-        5. Generate a response that can answer long-term recall questions.
-        6. Append the assistant reply and update token counters.
-        """
+        self.compact_memory.append(thread_id, "user", message)
 
-        raise NotImplementedError
+        prompt_tokens = self._estimate_prompt_context_tokens(user_id, thread_id)
+        self.thread_prompt_tokens[thread_id] = (
+            self.thread_prompt_tokens.get(thread_id, 0) + prompt_tokens
+        )
+
+        answer = self._offline_response(user_id, thread_id, message)
+        self.compact_memory.append(thread_id, "assistant", answer)
+
+        agent_tokens = estimate_tokens(answer)
+        self.thread_tokens[thread_id] = self.thread_tokens.get(thread_id, 0) + agent_tokens
+
+        return {"answer": answer, "agent_tokens": agent_tokens, "prompt_tokens": prompt_tokens}
 
     def _estimate_prompt_context_tokens(self, user_id: str, thread_id: str) -> int:
-        """Student TODO: estimate the context carried into one turn.
-
-        Hint:
-        - Include `User.md`
-        - Include compact summary text
-        - Include recent kept messages
-        """
-
-        raise NotImplementedError
+        profile_text = self.profile_store.read_text(user_id)
+        ctx = self.compact_memory.context(thread_id)
+        summary = str(ctx.get("summary", ""))
+        recent = ctx.get("messages", [])  # type: ignore[assignment]
+        recent_text = " ".join(m["content"] for m in recent)  # type: ignore[union-attr]
+        return (
+            estimate_tokens(profile_text)
+            + estimate_tokens(summary)
+            + estimate_tokens(recent_text)
+        )
 
     def _offline_response(self, user_id: str, thread_id: str, message: str) -> str:
-        """Student TODO: return a deterministic answer using persisted memory.
+        facts = self.profile_store.facts(user_id)
+        low = message.lower()
+        parts: list[str] = []
 
-        Make sure the advanced agent can answer questions like:
-        - "Mình tên gì?"
-        - "Hiện tại mình làm nghề gì?"
-        - "Nhắc lại style trả lời mình thích"
-        - questions in the long stress dataset
-        """
+        if any(k in low for k in ["tên", "ai", "tóm tắt", "nhắc lại"]) and facts.get("name"):
+            parts.append(facts["name"])
+        if any(k in low for k in ["ở đâu", "nơi ở", "còn ở"]) and facts.get("location"):
+            parts.append(facts["location"])
+        if any(k in low for k in ["nghề", "công việc"]) and facts.get("profession"):
+            parts.append(facts["profession"])
+        if "đồ uống" in low and facts.get("drink"):
+            parts.append(facts["drink"])
+        if "món ăn" in low and facts.get("food"):
+            parts.append(facts["food"])
+        if "nuôi" in low and facts.get("pet"):
+            parts.append(facts["pet"])
+        if any(k in low for k in ["style", "trả lời", "phong cách"]) and facts.get("style"):
+            parts.append(facts["style"])
+        if "quan tâm" in low and facts.get("interests"):
+            parts.append(facts["interests"])
 
-        raise NotImplementedError
+        if not parts:
+            return "Mình đã ghi nhận thông tin bạn vừa chia sẻ và sẽ lưu lại."
+
+        return "Dựa trên thông tin đã lưu: " + "; ".join(parts) + "."
+
+    def _reply_live(self, user_id: str, thread_id: str, message: str) -> dict[str, Any]:
+        updates = extract_profile_updates(message)
+        existing_facts = self.profile_store.facts(user_id)
+        for key, value in updates.items():
+            if key in _MERGE_KEYS:
+                merged = _merge_descriptors(existing_facts.get(key, ""), value)
+                self.profile_store.upsert_fact(user_id, key, merged)
+            else:
+                self.profile_store.upsert_fact(user_id, key, value)
+
+        self.compact_memory.append(thread_id, "user", message)
+        profile_text = self.profile_store.read_text(user_id)
+        ctx = self.compact_memory.context(thread_id)
+        recent = ctx.get("messages", [])  # type: ignore[assignment]
+
+        history = [("system", profile_text), ("system", str(ctx.get("summary", "")))]
+        history += [(m["role"], m["content"]) for m in recent]  # type: ignore[union-attr]
+
+        prompt_text = profile_text + str(ctx.get("summary", "")) + " ".join(
+            m["content"] for m in recent  # type: ignore[union-attr]
+        )
+        prompt_tokens = estimate_tokens(prompt_text)
+        self.thread_prompt_tokens[thread_id] = (
+            self.thread_prompt_tokens.get(thread_id, 0) + prompt_tokens
+        )
+
+        response = self.langchain_agent.invoke(history)
+        answer = getattr(response, "content", str(response))
+        self.compact_memory.append(thread_id, "assistant", answer)
+
+        agent_tokens = estimate_tokens(answer)
+        self.thread_tokens[thread_id] = self.thread_tokens.get(thread_id, 0) + agent_tokens
+
+        return {"answer": answer, "agent_tokens": agent_tokens, "prompt_tokens": prompt_tokens}
 
     def _maybe_build_langchain_agent(self):
-        """Student TODO: wire a live agent with tools and compact middleware.
-
-        High-level design:
-        - `build_chat_model(self.config.model)` for the selected provider
-        - `InMemorySaver` for short-term thread state
-        - tool to read `User.md`
-        - tool to write/edit `User.md`
-        - dynamic prompt that injects profile memory
-        - summarization middleware for long threads
-        """
-
-        raise NotImplementedError
+        try:
+            if not self.config.model.api_key and self.config.model.provider != "ollama":
+                return None
+            return build_chat_model(self.config.model)
+        except Exception:
+            return None
