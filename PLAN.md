@@ -80,11 +80,11 @@
 ## B9. Bonus (90–100 điểm)
 - [x] Conflict handling: correction mới ghi đè fact cũ (`upsert_fact` ghi đè theo key + lọc cụm phủ định `_is_negated_before`)
 - [x] Bỏ qua câu hỏi, không lưu nhầm thành fact (lọc `?`, `đùa`, `họp`/`bay`)
-- [ ] Confidence threshold trước khi ghi `User.md` — **chưa làm**, hiện tại ghi trực tiếp khi regex khớp, không có điểm tin cậy
+- [x] Confidence threshold trước khi ghi `User.md` — `extract_profile_updates_with_confidence()` gán điểm tin cậy 0.5–0.95 theo độ rõ ràng của pattern; `extract_profile_updates()` lọc bỏ fact < 0.6 trước khi ghi
 - [x] Ghi vào `STEP8.md`: bonus giải quyết gì, cải thiện gì, rủi ro gì
 
 ## B10. Nộp bài
-- [ ] Đổi tên repo/thư mục thành `KX-DAY17-HoVaTen-MSSV` — **cần họ tên + MSSV từ bạn**
+- [x] Đổi tên repo/thư mục thành `...-TruongHoangThanhAn-2A202602574-...` — đã đổi
 - [x] Không có `.env`, API key hay `state/` trong repo (đã xoá `state/` sau mỗi lần chạy, `.gitignore` đã chặn)
 - [x] Có `STEP8.md`
 - [x] Chạy lại `python src/benchmark.py` từ trạng thái sạch
@@ -93,5 +93,5 @@
 - [ ] Dán link repo vào bài nộp trên VLearn — **cần bạn tự làm sau khi push**
 
 ## Cần xác nhận
-- [ ] Họ tên + MSSV (để đặt tên repo)
+- [x] Họ tên + MSSV: Trương Hoàng Thành An — 2A202602574 (dùng để đặt tên repo)
 - [x] Chỉ offline hay có thêm live mode → đã chọn: **offline là chính** (deterministic, không cần API key); có thêm đường live-mode phụ (`_maybe_build_langchain_agent` + `_reply_live`) tự fallback về offline khi thiếu API key/import lỗi

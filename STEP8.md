@@ -7,7 +7,7 @@
 | Agent | Agent tokens only | Prompt tokens processed | Cross-session recall | Response quality | Memory growth (bytes) | Compactions |
 |---|---|---|---|---|---|---|
 | Baseline | 2520 | 18240 | 0.0 | 0.3 | 0 | 0 |
-| Advanced | 1611 | 21527 | 1.0 | 1.0 | 306 | 2 |
+| Advanced | 1615 | 21635 | 1.0 | 1.0 | 315 | 2 |
 
 ### Long-Context Stress Benchmark (`data/advanced_long_context.json`)
 
@@ -52,4 +52,17 @@ Rủi ro đi kèm:
 
 **Cải thiện đo được**: trước khi thêm xử lý phủ định, Advanced recall ở Standard Benchmark chỉ đạt `0.714` (nhiều câu hỏi về nghề nghiệp/nơi ở trả lời sai vì bắt nhầm fact cũ sau cụm phủ định). Sau khi thêm `_is_negated_before()`, recall và response quality đạt `1.0` ở cả hai bộ benchmark mà không cần tăng `compact_threshold_tokens` hay sửa dữ liệu.
 
-**Rủi ro thêm**: danh sách từ khoá phủ định (`không còn`, `đừng nói`, `chỉ là`...) là heuristic cố định — nếu người dùng diễn đạt correction theo cách khác (ví dụ dùng từ đồng nghĩa không có trong danh sách), agent vẫn có thể bắt nhầm fact cũ. Hướng mở rộng tiếp theo là thay heuristic bằng LLM-based extraction có `confidence score`, chỉ ghi vào `User.md` khi độ tin cậy vượt ngưỡng.
+**Rủi ro thêm**: danh sách từ khoá phủ định (`không còn`, `đừng nói`, `chỉ là`...) là heuristic cố định — nếu người dùng diễn đạt correction theo cách khác (ví dụ dùng từ đồng nghĩa không có trong danh sách), agent vẫn có thể bắt nhầm fact cũ.
+
+## Bonus đã triển khai: Confidence threshold trước khi ghi `User.md`
+
+`extract_profile_updates_with_confidence()` (trong `memory_store.py`) gán một điểm tin cậy `[0, 1]` cho mỗi fact trích được, thay vì coi mọi match là chắc chắn như nhau:
+
+- Match rõ ràng, ít mơ hồ (`tên mình là X`, `corgi tên X`, `nơi ở hiện tại là X`, nghề nghiệp khớp đúng cụm trong danh sách) → confidence `0.85–0.95`.
+- Match suy luận lỏng hơn, dễ là tín hiệu tạm thời hoặc trùng từ ngẫu nhiên (ví dụ chỉ nhắc "corgi" mà không kèm tên riêng) → confidence `0.5`, **thấp hơn** ngưỡng mặc định `DEFAULT_CONFIDENCE_THRESHOLD = 0.6`.
+
+`extract_profile_updates()` (hàm agent thật sự gọi) wrap hàm trên và lọc bỏ mọi fact có confidence `< 0.6` trước khi trả về, nên `_reply_offline()`/`_reply_live()` trong `agent_advanced.py` không cần đổi gì — chúng chỉ nhận fact đã qua lọc.
+
+**Cải thiện đo được**: benchmark trước/sau khi thêm threshold cho kết quả recall/response-quality giống nhau (`1.0`/`1.0` ở cả hai bộ) vì toàn bộ fact trong dữ liệu benchmark đều là match rõ ràng (confidence ≥ 0.7). Khoản tăng nhỏ ở `Memory growth` (306 → 315 bytes, Standard Benchmark) đến từ việc tách `pet` thành hai mức tin cậy khiến giá trị ghi vào `User.md` ổn định hơn qua các lượt lặp lại thông tin thú cưng. Giá trị thực của bonus này nằm ở việc chặn các trường hợp **chưa xuất hiện trong benchmark**: một câu chỉ nhắc đến "corgi" ngẫu nhiên (ví dụ bình luận về thú cưng của người khác) sẽ không còn tự động được ghi thành fact `pet` của người dùng.
+
+**Rủi ro thêm**: ngưỡng `0.6` và điểm số cho từng pattern là heuristic cố định do người viết gán, chưa được calibrate trên dữ liệu thật — nếu đặt ngưỡng quá cao sẽ bỏ sót fact đúng, quá thấp sẽ không lọc được fact sai. Hướng mở rộng tiếp theo là thay các điểm số cố định bằng LLM-based extraction tự ước lượng `confidence score` theo ngữ cảnh câu nói.

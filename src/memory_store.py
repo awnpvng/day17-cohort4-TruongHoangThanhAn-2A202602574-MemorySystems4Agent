@@ -144,13 +144,18 @@ class UserProfileStore:
         return self.write_text(user_id, text)
 
 
-def extract_profile_updates(message: str) -> dict[str, str]:
-    """Extract stable profile facts from one raw user message.
+DEFAULT_CONFIDENCE_THRESHOLD = 0.6
 
-    Skips questions and known noise (meeting-trip mentions, jokes).
+
+def extract_profile_updates_with_confidence(message: str) -> dict[str, tuple[str, float]]:
+    """Extract stable profile facts from one raw user message, with a confidence score.
+
+    Skips questions and known noise (meeting-trip mentions, jokes). Each fact gets a
+    confidence in [0, 1]: explicit, unambiguous patterns (e.g. "tên mình là X") score
+    high; looser inferences (e.g. bare mention of "corgi" with no name) score lower.
     """
 
-    facts: dict[str, str] = {}
+    facts: dict[str, tuple[str, float]] = {}
     if not message or not message.strip():
         return facts
 
@@ -161,14 +166,14 @@ def extract_profile_updates(message: str) -> dict[str, str]:
         if token in message and token not in style_hits:
             style_hits.append(token)
     if style_hits:
-        facts["style"] = ", ".join(style_hits)
+        facts["style"] = (", ".join(style_hits), 0.9)
 
     interest_hits: list[str] = []
     for token in _INTEREST_TOKENS:
         if re.search(rf"\b{re.escape(token)}\b", message) and token not in interest_hits:
             interest_hits.append(token)
     if interest_hits:
-        facts["interests"] = ", ".join(interest_hits)
+        facts["interests"] = (", ".join(interest_hits), 0.7)
 
     for sent in sentences:
         if "?" in sent:
@@ -180,15 +185,15 @@ def extract_profile_updates(message: str) -> dict[str, str]:
         if "corgi" not in low:
             name_matches = _find_capitalized_after(_NAME_PREFIX_RE, sent)
             if name_matches:
-                facts["name"] = name_matches[-1]
+                facts["name"] = (name_matches[-1], 0.95)
 
         if not is_meeting and not is_joke:
             loc_matches = _find_capitalized_after(_LOCATION_PREFIX_RE, sent, skip_negated=True)
             if loc_matches:
-                facts["location"] = loc_matches[-1]
+                facts["location"] = (loc_matches[-1], 0.85)
             loc_matches_2 = _find_capitalized_after(_LOCATION_PREFIX_RE_2, sent)
             if loc_matches_2:
-                facts["location"] = loc_matches_2[-1]
+                facts["location"] = (loc_matches_2[-1], 0.95)
 
         if not is_joke:
             prof_matches = [
@@ -197,21 +202,36 @@ def extract_profile_updates(message: str) -> dict[str, str]:
                 if not _is_negated_before(sent, m.start())
             ]
             if prof_matches:
-                facts["profession"] = prof_matches[-1]
+                facts["profession"] = (prof_matches[-1], 0.9)
 
         if "cà phê sữa đá" in sent:
-            facts["drink"] = "cà phê sữa đá"
+            facts["drink"] = ("cà phê sữa đá", 0.9)
 
         if "mì Quảng" in sent:
-            facts["food"] = "mì Quảng"
+            facts["food"] = ("mì Quảng", 0.9)
 
         pet_matches = _find_capitalized_after(_PET_PREFIX_RE, sent)
         if pet_matches:
-            facts["pet"] = f"corgi tên {pet_matches[-1]}"
-        elif "corgi" in low:
-            facts.setdefault("pet", "corgi")
+            facts["pet"] = (f"corgi tên {pet_matches[-1]}", 0.95)
+        elif "corgi" in low and "pet" not in facts:
+            # Bare mention without a name is a weaker signal (could be a one-off remark).
+            facts["pet"] = ("corgi", 0.5)
 
     return facts
+
+
+def extract_profile_updates(
+    message: str, min_confidence: float = DEFAULT_CONFIDENCE_THRESHOLD
+) -> dict[str, str]:
+    """Extract stable profile facts from one raw user message.
+
+    Wraps `extract_profile_updates_with_confidence()` and drops facts whose
+    confidence is below `min_confidence`, so weak/ambiguous signals never reach
+    `User.md`.
+    """
+
+    scored = extract_profile_updates_with_confidence(message)
+    return {key: value for key, (value, score) in scored.items() if score >= min_confidence}
 
 
 def summarize_messages(messages: list[dict[str, str]], max_items: int = 6) -> str:
